@@ -1,4 +1,3 @@
-from torch.fx.experimental.migrate_gradual_types.z3_types import dim
 from einops import rearrange
 from tqdm import tqdm
 from typing import List, Optional
