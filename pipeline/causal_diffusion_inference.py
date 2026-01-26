@@ -1,7 +1,10 @@
+from torch.fx.experimental.migrate_gradual_types.z3_types import dim
+from einops import rearrange
 from tqdm import tqdm
 from typing import List, Optional
 import torch
 
+from wan.modules.clip import CLIPModel
 from wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
@@ -14,14 +17,24 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             device,
             generator=None,
             text_encoder=None,
-            vae=None
+            vae=None,
+            image_encoder=None
     ):
         super().__init__()
+        self.device = device
         # Step 1: Initialize all models
         self.generator = WanDiffusionWrapper(
             **getattr(args, "model_kwargs", {}), is_causal=True) if generator is None else generator
         self.text_encoder = WanTextEncoder() if text_encoder is None else text_encoder
+        self.image_encoder = CLIPModel(
+            dtype=torch.float32,
+            device=device,
+            checkpoint_path="wan_models/Wan2.1-T2V-1.3B/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            tokenizer_path="xlm-roberta-large"
+        ) if image_encoder is None else image_encoder
         self.vae = WanVAEWrapper() if vae is None else vae
+        self.dwpose_embedding = self._get_dwpose_embedding() # TODO: Implement model weight loading
+        self.randomref_embedding_pose = self._get_randomref_embedding_pose()
 
         # Step 2: Initialize scheduler
         self.num_train_timesteps = args.num_train_timestep
@@ -45,14 +58,105 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
 
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
+    
+    def _get_dwpose_embedding(self):
+        CONCAT_DIM = 4
+        dwpose_embedding = torch.nn.Sequential(
+                    torch.nn.Conv3d(3, CONCAT_DIM * 4, (3,3,3), stride=(1,1,1), padding=(1,1,1)),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, CONCAT_DIM * 4, (3,3,3), stride=(1,1,1), padding=(1,1,1)),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, CONCAT_DIM * 4, (3,3,3), stride=(1,1,1), padding=(1,1,1)),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, CONCAT_DIM * 4, (3,3,3), stride=(1,2,2), padding=(1,1,1)),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=(2,2,2), padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=(2,2,2), padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv3d(CONCAT_DIM * 4, 5120, (1,2,2), stride=(1,2,2), padding=0)
+        )
+        return dwpose_embedding
+    
+    def _get_randomref_embedding_pose(self):
+        CONCAT_DIM = 4
+        RANDOMREF_DIM = 20
+        randomref_embedding_pose = torch.nn.Sequential(
+                    torch.nn.Conv2d(3, CONCAT_DIM * 4, 3, stride=1, padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv2d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=1, padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv2d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=1, padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv2d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=2, padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv2d(CONCAT_DIM * 4, CONCAT_DIM * 4, 3, stride=2, padding=1),
+                    torch.nn.SiLU(),
+                    torch.nn.Conv2d(CONCAT_DIM * 4, RANDOMREF_DIM, 3, stride=2, padding=1),
+        )
+        return randomref_embedding_pose
 
+    def load_pose_embedding_weights(self, state_dict_or_path):
+        if isinstance(state_dict_or_path, str):
+            state_dict = torch.load(state_dict_or_path, map_location="cpu")
+        else:
+            state_dict = state_dict_or_path
+
+        dwpose_sd = {
+            k.split("dwpose_embedding.", 1)[1]: v
+            for k, v in state_dict.items()
+            if k.startswith("dwpose_embedding.")
+        }
+        randomref_sd = {
+            k.split("randomref_embedding_pose.", 1)[1]: v
+            for k, v in state_dict.items()
+            if k.startswith("randomref_embedding_pose.")
+        }
+        if dwpose_sd:
+            self.dwpose_embedding.load_state_dict(dwpose_sd, strict=True)
+        if randomref_sd:
+            self.randomref_embedding_pose.load_state_dict(randomref_sd, strict=True)
+        if not dwpose_sd and not randomref_sd:
+            raise ValueError("No pose embedding weights found in state_dict.")
+    
+    def preprocess_image(self, image):
+        image = torch.Tensor(np.array(image, dtype=np.float32) * (2 / 255) - 1).permute(2, 0, 1).unsqueeze(0) # Normalize to [-1, 1]
+        return image
+
+    def encode_image(
+        self,
+        image,
+        num_frames,
+        height,
+        width
+    ):
+        image = self.preprocess_image(image.resize((width, height))).to(self.device)
+        clip_context = self.image_encoder.visual([image]) # visual is the equivalent of encode_image in this repo
+        msk = torch.ones(1, num_frames, height//8, width//8, device=self.device)
+        msk[:, 1:] = 0
+        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+        msk = msk.view(1, msk.shape[1]//4, 4, 4, height//8, width//8)
+        msk = msk.transpose(1, 2)[0]
+        
+        vae_input = torch.concat([image.transpose(0, 1), torch.zeros(3, num_frames-1, height, width).to(image.device)], dim=1)
+        y = self.vae.model.encode([vae_input.to(dtype=self.torch_dtype, device=self.device)], device=self.device)[0]
+        y = torch.concat([msk, y])
+        y = y.unsqueeze(0)
+        clip_context = clip_context.to(dtype=self.torch_dtype, device=self.device)
+        y = y.to(dtype=self.torch_dtype, device=self.device)
+        return {"clip_feature": clip_context, "y": y}
+        
+    
     def inference(
         self,
         noise: torch.Tensor,
         text_prompts: List[str],
+        input_image: Optional[torch.Tensor], # TODO: Decide if this should just be the embedding
+        dwpose_data: Optional[torch.Tensor],
+        random_ref_dwpose: Optional[torch.Tensor],
         initial_latent: Optional[torch.Tensor] = None,
         return_latents: bool = False,
-        start_frame_index: Optional[int] = 0
+        start_frame_index: Optional[int] = 0,
     ) -> torch.Tensor:
         """
         Perform inference on the given noise and text prompts.
@@ -184,6 +288,39 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 cache_start_frame += self.num_frame_per_block
 
         # Step 3: Temporal denoising loop
+        
+        # Below is a direct copy from UniAnimate-DiT
+        # diffsynth/pipelines/wan_video.py line 707 and skipping some
+        # TODO: Actually plug in the components
+        # Image conditioning is not wired yet; keep placeholder dict for future use.
+        if input_image is not None and self.image_encoder is not None:
+            # self.load_models_to_device(["image_encoder", "vae"])
+            image_emb = self.encode_image(input_image, num_frames, height, width)
+        else:
+            image_emb = {}
+
+        device = noise.device
+        self.dwpose_embedding.to(device)
+        self.randomref_embedding_pose.to(device)
+
+        dwpose_data_emb = None
+        if dwpose_data is not None and random_ref_dwpose is not None:
+            dwpose_data = dwpose_data.unsqueeze(0)
+            dwpose_data_emb = self.dwpose_embedding(
+                (torch.cat([dwpose_data[:, :, :1].repeat(1, 1, 3, 1, 1), dwpose_data], dim=2) / 255.0).to(device)
+            ).to(torch.bfloat16)
+            random_ref_dwpose_data = self.randomref_embedding_pose(
+                (random_ref_dwpose.unsqueeze(0) / 255.0).to(device).permute(0, 3, 1, 2)
+            ).unsqueeze(2).to(torch.bfloat16)  # [1, 20, 104, 60]
+
+            # TODO: integrate image_emb into the model...
+            if "y" in image_emb:
+                image_emb["y"] = image_emb["y"] + random_ref_dwpose_data  # image_emb is the image to be driven by the pose
+
+        # Extract image conditioning features to pass to model
+        clip_feature = image_emb.get("clip_feature", None)
+        y = image_emb.get("y", None)
+
         all_num_frames = [self.num_frame_per_block] * num_blocks
         if self.independent_first_frame and initial_latent is None:
             all_num_frames = [1] + all_num_frames
@@ -200,6 +337,18 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     [batch_size, current_num_frames], device=noise.device, dtype=torch.float32
                 )
 
+                if dwpose_data_emb is not None:
+                    start = current_start_frame
+                    end = current_start_frame + current_num_frames
+                    if end > dwpose_data_emb.shape[2]:
+                        raise ValueError("dwpose_data has fewer frames than required for the current block.")
+                    condition = rearrange(
+                        dwpose_data_emb[:, :, start:end],
+                        'b c f h w -> b (f h w) c'
+                    ).contiguous()
+                else:
+                    condition = None
+
                 flow_pred_cond, _ = self.generator(
                     noisy_image_or_video=latent_model_input,
                     conditional_dict=conditional_dict,
@@ -207,7 +356,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    add_condition = condition,
+                    clip_feature = clip_feature,
+                    y = y
                 )
                 flow_pred_uncond, _ = self.generator(
                     noisy_image_or_video=latent_model_input,
@@ -216,7 +368,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    add_condition = None,
+                    clip_feature = clip_feature,
+                    y = y
                 )
 
                 flow_pred = flow_pred_uncond + self.args.guidance_scale * (
@@ -242,7 +397,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 kv_cache=self.kv_cache_pos,
                 crossattn_cache=self.crossattn_cache_pos,
                 current_start=current_start_frame * self.frame_seq_length,
-                cache_start=cache_start_frame * self.frame_seq_length
+                cache_start=cache_start_frame * self.frame_seq_length,
+                add_condition = condition,
+                clip_feature = clip_feature,
+                y = y
             )
             self.generator(
                 noisy_image_or_video=latents,
@@ -251,7 +409,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 kv_cache=self.kv_cache_neg,
                 crossattn_cache=self.crossattn_cache_neg,
                 current_start=current_start_frame * self.frame_seq_length,
-                cache_start=cache_start_frame * self.frame_seq_length
+                cache_start=cache_start_frame * self.frame_seq_length,
+                add_condition = None,
+                clip_feature = clip_feature,
+                y = y
             )
 
             # Step 3.4: update the start and end frame indices

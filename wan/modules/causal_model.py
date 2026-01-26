@@ -1,3 +1,4 @@
+from typing import Optional
 from wan.modules.attention import attention
 from wan.modules.model import (
     WanRMSNorm,
@@ -489,6 +490,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
 
+        # Projection layer for pose conditioning (from UniAnimate-DiT)
+        # UniAnimate's dwpose_embedding outputs 5120 channels, designed for 14B model
+        # For 1.3B model (dim=1536), we need to project 5120 -> dim
+        # For 14B model (dim=5120), this is a no-op (identity)
+        if dim == 5120:
+            self.pose_proj = nn.Identity()
+        else:
+            self.pose_proj = nn.Linear(5120, dim)
+
         # initialize weights
         self.init_weights()
 
@@ -717,6 +727,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         seq_len,
         clip_fea=None,
         y=None,
+        add_condition: Optional[torch.Tensor] = None,
         kv_cache: dict = None,
         crossattn_cache: dict = None,
         current_start: int = 0,
@@ -764,7 +775,41 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
-        x = torch.cat(x)
+        x = torch.cat(x)  # Shape: [B * L, C] (flattened batch)
+
+        # Handle pose conditioning from UniAnimate-DiT
+        # add_condition comes in as [B, L_pose, 5120] from the pipeline
+        # x is [B * L_video, C] - we need to reshape x to [B, L_video, C] to add properly
+        if add_condition is not None:
+            add_condition = add_condition.to(device=x.device, dtype=x.dtype)
+
+            # Recover batch dimension from flattened x
+            # x: [B * L, C] -> [B, L, C]
+            B = len(seq_lens)
+            L = x.shape[0] // B
+            C = x.shape[-1]
+            x_reshaped = x.view(B, L, C)
+
+            # Project add_condition if needed: 5120 -> dim
+            # add_condition: [B, L_pose, 5120] -> [B, L_pose, dim]
+            add_condition = self.pose_proj(add_condition)
+
+            # Handle spatial dimension mismatch
+            # add_condition may have different spatial tokens than x due to rearrange in pipeline
+            # The pipeline does: 'b c f h w -> b (f h w) c' which should match L
+            if add_condition.shape[1] != L:
+                # If spatial dimensions don't match, we need to reshape or interpolate
+                # For now, let's assume they match (pose data should cover all tokens)
+                raise ValueError(
+                    f"add_condition spatial dim {add_condition.shape[1]} doesn't match "
+                    f"x spatial dim {L}. Check pose data processing."
+                )
+
+            # Add condition: [B, L, C] + [B, L, C]
+            x_reshaped = x_reshaped + add_condition
+
+            # Reshape back to flattened format: [B, L, C] -> [B * L, C]
+            x = x_reshaped.view(-1, C)
         """
         torch.cat([
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
