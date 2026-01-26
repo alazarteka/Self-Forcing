@@ -2,6 +2,7 @@ from torch.fx.experimental.migrate_gradual_types.z3_types import dim
 from einops import rearrange
 from tqdm import tqdm
 from typing import List, Optional
+import numpy as np
 import torch
 
 from wan.modules.clip import CLIPModel
@@ -50,6 +51,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         self.crossattn_cache_pos = None
         self.crossattn_cache_neg = None
         self.args = args
+        self.torch_dtype = torch.bfloat16
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
         self.independent_first_frame = args.independent_first_frame
         self.local_attn_size = self.generator.model.local_attn_size
@@ -295,7 +297,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         # Image conditioning is not wired yet; keep placeholder dict for future use.
         if input_image is not None and self.image_encoder is not None:
             # self.load_models_to_device(["image_encoder", "vae"])
-            image_emb = self.encode_image(input_image, num_frames, height, width)
+            # height, width are latent dimensions, multiply by 8 for pixel space
+            image_emb = self.encode_image(input_image, num_frames, height * 8, width * 8)
         else:
             image_emb = {}
 
