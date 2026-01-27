@@ -1,0 +1,12 @@
+independent_first_frame: true
+timestep_shift: 8.0
+num_train_timestep: 1000
+num_output_frames: 3
+guidance_scale: 7.5
+num_frame_per_block: 1
+negative_prompt: ""
+height: 480
+width: 832
+num_frames: 3
+data_path: test_prompts.json
+output_folder: videos/test_run

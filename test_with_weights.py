@@ -166,11 +166,19 @@ def test_model_loading(device):
         noise = torch.randn(batch_size, num_frames, 16, 8, 8).to(device)
         prompts = ["A test prompt"]
         
-        print("Using mock embeddings (skipping T5 for NFS compatibility)...")
-        # Mock T5 output: [batch_size, seq_len=512, hidden_dim=4096]
-        conditional_dict = {
-            "prompt_embeds": torch.randn(len(prompts), 512, 4096, dtype=torch.bfloat16).to(device)
-        }
+        print("Encoding prompt with real T5 stack...")
+        from utils.wan_wrapper import WanTextEncoder
+        
+        # Override weights path temporarily if it exists in shm
+        import os
+        shm_path = "/dev/shm/models_t5_umt5-xxl-enc-bf16.pth"
+        if os.path.exists(shm_path):
+             # We can't easily change the hardcoded path in WanTextEncoder without editing it,
+             # so let's just make sure it loads efficiently.
+             pass
+             
+        text_encoder = WanTextEncoder() 
+        conditional_dict = text_encoder(prompts)
 
         # Don't use KV cache for this test
         with torch.no_grad():

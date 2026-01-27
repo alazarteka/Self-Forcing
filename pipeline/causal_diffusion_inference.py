@@ -22,17 +22,38 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
     ):
         super().__init__()
         self.device = device
-        # Step 1: Initialize all models
+        
+        # Import gc for memory management
+        import gc
+        
+        # Step 1: Initialize models SEQUENTIALLY with garbage collection
+        # This reduces memory pressure during loading
+        
+        print("Loading generator...")
         self.generator = WanDiffusionWrapper(
             **getattr(args, "model_kwargs", {}), is_causal=True) if generator is None else generator
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        print("Loading text encoder...")
         self.text_encoder = WanTextEncoder() if text_encoder is None else text_encoder
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        print("Loading image encoder (CLIP)...")
         self.image_encoder = CLIPModel(
             dtype=torch.float32,
             device=device,
             checkpoint_path="wan_models/Wan2.1-T2V-1.3B/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
             tokenizer_path="xlm-roberta-large"
         ) if image_encoder is None else image_encoder
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        print("Loading VAE...")
         self.vae = WanVAEWrapper() if vae is None else vae
+        gc.collect()
+        torch.cuda.empty_cache()
         self.dwpose_embedding = self._get_dwpose_embedding()
         self.randomref_embedding_pose = self._get_randomref_embedding_pose()
         self.pose_weights_path = getattr(args, "pose_weights_path", None)

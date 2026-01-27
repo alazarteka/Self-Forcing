@@ -68,7 +68,7 @@ else:
 
 if args.checkpoint_path:
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
-    pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
+    pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'], strict=False)
 
 pipeline = pipeline.to(dtype=torch.bfloat16)
 if low_memory:
@@ -168,7 +168,9 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         text_prompts=prompts,
         return_latents=True,
         initial_latent=initial_latent,
-        low_memory=low_memory,
+        input_image=None,
+        dwpose_data=None,
+        random_ref_dwpose=None,
     )
     current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
     all_video.append(current_video)
@@ -189,4 +191,6 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
                 output_path = os.path.join(args.output_folder, f'{idx}-{seed_idx}_{model}.mp4')
             else:
                 output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed_idx}.mp4')
-            write_video(output_path, video[seed_idx], fps=16)
+            # Use imageio instead of write_video to avoid pictype bug
+            import imageio
+            imageio.mimwrite(output_path, video[seed_idx].numpy().astype('uint8'), fps=16)

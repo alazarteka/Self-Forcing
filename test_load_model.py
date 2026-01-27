@@ -8,20 +8,57 @@ import sys
 
 def encode_text_on_cpu(prompts: list, device: torch.device) -> dict:
     """
-    Mock text encoding - bypasses T5 loading issues on NFS.
-    Returns random embeddings with the correct shape.
+    Load and run T5 text encoder on CPU.
+    Tries local /dev/shm first to avoid NFS memory-mapping issues.
     """
-    print("  Using mock embeddings (T5 loading skipped for NFS compatibility)")
+    import os
+    local_path = "/dev/shm/models_t5_umt5-xxl-enc-bf16.pth"
+    workspace_path = "wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth"
+    t5_path = local_path if os.path.exists(local_path) else workspace_path
+
+    from wan.modules.t5 import umt5_xxl
+    from wan.modules.tokenizers import HuggingfaceTokenizer
+
+    cpu_device = torch.device('cpu')
+    print(f"  Loading T5 from {t5_path}...")
+
+    # Load T5 text encoder on CPU in bfloat16
+    text_encoder = umt5_xxl(
+        encoder_only=True,
+        return_tokenizer=False,
+        dtype=torch.bfloat16,
+        device=cpu_device
+    ).eval().requires_grad_(False)
     
-    # T5-XXL output: [batch_size, seq_len, hidden_dim]
-    # seq_len=512, hidden_dim=4096 for T5-XXL
-    batch_size = len(prompts)
-    seq_len = 512
-    hidden_dim = 4096
-    
-    # Random embeddings as mock
-    context = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
-    
+    # Use mmap=False for safety, though /dev/shm should handle mmap fine
+    text_encoder.load_state_dict(
+        torch.load(t5_path, map_location=cpu_device, weights_only=True, mmap=False)
+    )
+
+    # Load tokenizer
+    tokenizer = HuggingfaceTokenizer(
+        name="wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/",
+        seq_len=512,
+        clean='whitespace'
+    )
+
+    # Tokenize and encode
+    ids, mask = tokenizer(prompts, return_mask=True, add_special_tokens=True)
+    ids = ids.to(cpu_device)
+    mask = mask.to(cpu_device)
+
+    with torch.no_grad():
+        context = text_encoder(ids, mask)
+
+    # Zero out padding
+    seq_lens = mask.gt(0).sum(dim=1).long()
+    for u, v in zip(context, seq_lens):
+        u[v:] = 0.0
+
+    # Clean up
+    del text_encoder
+    torch.cuda.empty_cache()
+
     return {"prompt_embeds": context.to(device)}
 
 

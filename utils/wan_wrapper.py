@@ -21,9 +21,13 @@ class WanTextEncoder(torch.nn.Module):
             dtype=torch.float32,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
+        import os
+        local_path = "/tmp/models_t5_umt5-xxl-enc-bf16.pth"
+        t5_path = local_path if os.path.exists(local_path) else "wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth"
+        
+        print(f"Loading T5 from {t5_path}...")
         self.text_encoder.load_state_dict(
-            torch.load("wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
-                       map_location='cpu', weights_only=False)
+            torch.load(t5_path, map_location='cuda:0', weights_only=False)
         )
 
         self.tokenizer = HuggingfaceTokenizer(
