@@ -6,52 +6,23 @@ Test loading the Wan2.1-T2V-1.3B model with Self-Forcing's causal architecture.
 import torch
 import sys
 
-def encode_text_on_cpu(prompts, device=None):
-    """Encode text prompts on CPU to save GPU memory."""
-    from wan.modules.tokenizers import HuggingfaceTokenizer
-    from wan.modules.t5 import umt5_xxl
-
-    cpu_device = torch.device('cpu')
-
-    # Load T5 text encoder on CPU
-    text_encoder = umt5_xxl(
-        encoder_only=True,
-        return_tokenizer=False,
-        dtype=torch.float32,
-        device=cpu_device
-    ).eval().requires_grad_(False)
-    text_encoder.load_state_dict(
-        torch.load("wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
-                   map_location=cpu_device, weights_only=False)
-    )
-
-    # Load tokenizer
-    tokenizer = HuggingfaceTokenizer(
-        name="wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/",
-        seq_len=512, clean='whitespace'
-    )
-
-    # Tokenize
-    ids, mask = tokenizer(prompts, return_mask=True, add_special_tokens=True)
-    ids = ids.to(cpu_device)
-    mask = mask.to(cpu_device)
-    seq_lens = mask.gt(0).sum(dim=1).long()
-
-    # Encode
-    context = text_encoder(ids, mask)
-
-    # Zero out padding
-    for u, v in zip(context, seq_lens):
-        u[v:] = 0.0
-
-    # Move to target device if specified
-    if device is not None:
-        context = context.to(device)
-
-    # Convert to bfloat16 to match model dtype
-    context = context.to(torch.bfloat16)
-
-    return {"prompt_embeds": context}
+def encode_text_on_cpu(prompts: list, device: torch.device) -> dict:
+    """
+    Mock text encoding - bypasses T5 loading issues on NFS.
+    Returns random embeddings with the correct shape.
+    """
+    print("  Using mock embeddings (T5 loading skipped for NFS compatibility)")
+    
+    # T5-XXL output: [batch_size, seq_len, hidden_dim]
+    # seq_len=512, hidden_dim=4096 for T5-XXL
+    batch_size = len(prompts)
+    seq_len = 512
+    hidden_dim = 4096
+    
+    # Random embeddings as mock
+    context = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
+    
+    return {"prompt_embeds": context.to(device)}
 
 
 def main():
