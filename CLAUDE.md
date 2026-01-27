@@ -77,6 +77,21 @@ One-shot downloader (base + checkpoint + ODE + CLIP):
 python download_models.py
 ```
 
+### Offline LoRA Merge (Teacher Prep)
+
+When preparing a UniAnimate teacher for distillation, merge LoRAs **offline** into a base Wan checkpoint:
+```bash
+uv run python scripts/merge_lora.py \
+  --base /path/to/Wan2.1-14B-base.safetensors \
+  --lora /path/to/UniAnimate-14B-lora.pt \
+  --out /path/to/Wan2.1-14B-merged.safetensors \
+  --alpha 1.0 \
+  --device cpu \
+  --dtype float32
+```
+
+This keeps LoRAs separate until needed and produces a single merged checkpoint for the teacher.
+
 ### Testing
 
 See `testing_guide.md` for the full test ladder. Key checks:

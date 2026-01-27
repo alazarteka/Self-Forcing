@@ -1,59 +1,44 @@
-# AGENTS.md
+# Repository Guidelines
 
-## Mission
+## Project Structure & Module Organization
 
-Port UniAnimate-DiT pose/image conditioning into the Self-Forcing (causal) pipeline, and validate that inference works end-to-end with real weights. Training integration is planned but not fully implemented yet.
+- `pipeline/` holds inference pipelines (e.g., `causal_diffusion_inference.py`).
+- `wan/` contains core model components and attention blocks.
+- `utils/` provides wrappers (text encoder, VAE) and helpers.
+- `model/` and `trainer/` implement training and loss logic.
+- `configs/` stores YAML configs; `configs/tiny_test.yaml` is for quick runs.
+- Tests live at repo root: `test_*.py` and `testing_guide.md`.
+- Assets: prompts in `prompts/`, output videos in `videos/`.
 
-## Current State
+## Build, Test, and Development Commands
 
-- **Inference wiring:** Pose and image conditioning are integrated in:
-  - `pipeline/causal_diffusion_inference.py`
-  - `wan/modules/causal_model.py`
-  - `utils/wan_wrapper.py`
-- **Pose CNNs:** `dwpose_embedding` (3D CNN) and `randomref_embedding_pose` (2D CNN) are ported and can load pretrained weights lazily.
-- **Projection:** 5120 → model dim via `pose_proj` for the 1.3B model.
-- **Lazy pose weights:** `pose_weights_path` triggers on-demand loading; validated by `test_lazy_load.py`.
-- **Pose alignment:** Assertion enforces that pose embedding frames match the full output timeline.
+- Install dependencies: `uv pip install --system -r requirements.txt`
+- Download weights: `uv run python download_models.py`
+- Run wiring tests (CPU): `uv run python test_wiring.py`
+- Minimal flow (CPU/GPU): `uv run python test_minimal.py`
+- GPU load checks: `CUDA_VISIBLE_DEVICES=0 uv run python test_load_model.py`
+- Lazy pose load: `CUDA_VISIBLE_DEVICES=0 uv run python test_lazy_load.py --pose-weights-path /path/to/pose_ckpt.pt --strict`
+- Inference: `CUDA_VISIBLE_DEVICES=0 uv run python inference.py --config_path configs/self_forcing_dmd.yaml ...`
 
-## Repos and References
+## Coding Style & Naming Conventions
 
-- Self-Forcing (this repo)
-- UniAnimate-DiT (sibling): `../UniAnimate-DiT`
-- DWPose (sibling): `../dwpose`
+- Python, 4‑space indentation, standard PEP8 style.
+- Keep new scripts in `scripts/` and name with verbs (e.g., `merge_lora.py`).
+- Test files follow `test_*.py` naming.
 
-Key reference code in UniAnimate:
-- `diffsynth/pipelines/wan_video.py`
-- `diffsynth/models/wan_video_dit.py`
+## Testing Guidelines
 
-## Testing
+- See `testing_guide.md` for the full ladder.
+- Prefer CPU tests for wiring; use GPU tests for real weights.
+- Tests are standalone scripts; no pytest harness.
 
-Use the ladder in `testing_guide.md`. Key scripts:
-- `test_wiring.py`, `test_minimal.py`
-- `test_load_model.py`, `test_with_weights.py`
-- `test_lazy_load.py` (supports real checkpoint with `--pose-weights-path`)
+## Commit & Pull Request Guidelines
 
-For fast end-to-end runs:
-- `configs/tiny_test.yaml`
-- `test_prompts.json`
+- Commit messages in this repo are short, imperative, and sentence‑case (e.g., “Port UniAnimate-DiT pose…”).
+- PRs should include: summary of changes, test commands run, and any artifacts (e.g., sample videos or logs).
 
-## Known Caveats
+## Architecture & Research Notes
 
-- **Pose-only behavior:** Currently gated off unless `dwpose_data` and `random_ref_dwpose` are both present.
-- **T5 loading:** Uses `map_location='cuda:0'` and checks `/tmp` first to avoid NFS mmap issues. CPU-only runs will fail unless adjusted.
-- **CLIP weights:** Pulled from the I2V repo (see `download_models.py`).
-
-## Next Steps (Open Work)
-
-1. **Training integration**
-   - Thread `add_condition` through the teacher-forcing path in `utils/wan_wrapper.py`.
-   - Extend datasets to supply `dwpose_data` and `random_ref_dwpose`.
-2. **Pose-only support**
-   - Allow `dwpose_data` without `random_ref_dwpose` if desired.
-3. **Real pose checkpoint validation**
-   - Use `test_lazy_load.py --pose-weights-path /path/to/pose_ckpt.pt`.
-
-## Where to Start
-
-- Read `CHANGES.md` for recent fixes.
-- Run `uv run python test_lazy_load.py --pose-weights-path ...` for real lazy-load validation.
-- Compare with UniAnimate’s conditioning flow to confirm parity.
+- Goal: port UniAnimate‑DiT conditioning into Self‑Forcing’s causal pipeline and distill to a LoRA‑free 1.3B student.
+- Pose/image conditioning lives in `pipeline/` and `wan/modules/causal_model.py`.
+- Offline LoRA merge is supported via `scripts/merge_lora.py` before distillation.

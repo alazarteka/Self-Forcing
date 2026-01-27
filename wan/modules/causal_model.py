@@ -494,6 +494,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # UniAnimate's dwpose_embedding outputs 5120 channels, designed for 14B model
         # For 1.3B model (dim=1536), we need to project 5120 -> dim
         # For 14B model (dim=5120), this is a no-op (identity)
+
+        # Consider a more complex projection like 5120 -> 2048 -> dim if 
+        # needed with non-linearity
         if dim == 5120:
             self.pose_proj = nn.Identity()
         else:
