@@ -792,7 +792,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
             # Project add_condition if needed: 5120 -> dim
             # add_condition: [B, L_pose, 5120] -> [B, L_pose, dim]
-            add_condition = self.pose_proj(add_condition)
+            add_condition_dtype = add_condition.dtype
+            proj_weight = getattr(self.pose_proj, "weight", None)
+            proj_dtype = proj_weight.dtype if proj_weight is not None else add_condition_dtype
+            add_condition = self.pose_proj(add_condition.to(proj_dtype))
+            add_condition = add_condition.to(add_condition_dtype)
 
             # Handle spatial dimension mismatch
             # add_condition may have different spatial tokens than x due to rearrange in pipeline

@@ -64,6 +64,23 @@ def flash_attention(
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
 
+    # Check if flash attention is available before doing any preprocessing
+    if not FLASH_ATTN_2_AVAILABLE and not FLASH_ATTN_3_AVAILABLE:
+        # Redirect to attention function which has proper fallback to SDPA
+        return attention(
+            q=q, k=k, v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype,
+            fa_version=version
+        )
+
     def half(x):
         return x if x.dtype in half_dtypes else x.to(dtype)
 
@@ -115,7 +132,7 @@ def flash_attention(
             causal=causal,
             deterministic=deterministic)[0].unflatten(0, (b, lq))
     else:
-        assert FLASH_ATTN_2_AVAILABLE
+        # Flash Attention 2
         x = flash_attn.flash_attn_varlen_func(
             q=q,
             k=k,

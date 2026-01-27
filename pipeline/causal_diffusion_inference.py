@@ -33,8 +33,11 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             tokenizer_path="xlm-roberta-large"
         ) if image_encoder is None else image_encoder
         self.vae = WanVAEWrapper() if vae is None else vae
-        self.dwpose_embedding = self._get_dwpose_embedding() # TODO: Implement model weight loading
+        self.dwpose_embedding = self._get_dwpose_embedding()
         self.randomref_embedding_pose = self._get_randomref_embedding_pose()
+        self.pose_weights_path = getattr(args, "pose_weights_path", None)
+        self.pose_weights_strict = getattr(args, "pose_weights_strict", True)
+        self.pose_weights_loaded = False
 
         # Step 2: Initialize scheduler
         self.num_train_timesteps = args.num_train_timestep
@@ -97,7 +100,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         )
         return randomref_embedding_pose
 
-    def load_pose_embedding_weights(self, state_dict_or_path):
+    def load_pose_embedding_weights(self, state_dict_or_path, strict: bool = True):
         if isinstance(state_dict_or_path, str):
             state_dict = torch.load(state_dict_or_path, map_location="cpu")
         else:
@@ -114,9 +117,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             if k.startswith("randomref_embedding_pose.")
         }
         if dwpose_sd:
-            self.dwpose_embedding.load_state_dict(dwpose_sd, strict=True)
+            self.dwpose_embedding.load_state_dict(dwpose_sd, strict=strict)
         if randomref_sd:
-            self.randomref_embedding_pose.load_state_dict(randomref_sd, strict=True)
+            self.randomref_embedding_pose.load_state_dict(randomref_sd, strict=strict)
         if not dwpose_sd and not randomref_sd:
             raise ValueError("No pose embedding weights found in state_dict.")
     
@@ -302,6 +305,9 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             image_emb = {}
 
         device = noise.device
+        if self.pose_weights_path is not None and not self.pose_weights_loaded:
+            self.load_pose_embedding_weights(self.pose_weights_path, strict=self.pose_weights_strict)
+            self.pose_weights_loaded = True
         self.dwpose_embedding.to(device)
         self.randomref_embedding_pose.to(device)
 
@@ -326,6 +332,14 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         all_num_frames = [self.num_frame_per_block] * num_blocks
         if self.independent_first_frame and initial_latent is None:
             all_num_frames = [1] + all_num_frames
+        if dwpose_data_emb is not None:
+            # Pose embeddings must align to the *full* output timeline (including any initial/conditioning frames),
+            # because we slice by current_start_frame which is already advanced past cached frames.
+            expected_pose_frames = current_start_frame + sum(all_num_frames)
+            assert dwpose_data_emb.shape[2] == expected_pose_frames, (
+                f"dwpose_data_emb has {dwpose_data_emb.shape[2]} frames, "
+                f"but expected {expected_pose_frames} to match the output timeline."
+            )
         for current_num_frames in all_num_frames:
             noisy_input = noise[
                 :, cache_start_frame - num_input_frames:cache_start_frame + current_num_frames - num_input_frames]
