@@ -78,9 +78,13 @@ uv run python test_minimal.py
 
 Verify that the 1.3B model and T5 encoder load correctly. This requires a **GPU**. If FlashAttention is not installed, it tests the SDPA fallback path.
 
-**Requirement:** Download weights using `uv`.
+**Requirement:** Download weights using `uv` (or `download_models.py`).
 ```bash
 uv run huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir-use-symlinks False --local-dir wan_models/Wan2.1-T2V-1.3B
+```
+Optional one-shot downloader (includes Self-Forcing + ODE + CLIP):
+```bash
+uv run python download_models.py
 ```
 
 **Command:**
@@ -90,9 +94,9 @@ CUDA_VISIBLE_DEVICES=0 uv run python test_load_model.py
 
 ---
 
-## Level 4: Full System Validation (Lazy-load Check - GPU)
+## Level 4: Full System Validation (GPU)
 
-Complete system check validating the new lazy-load behavior for pose weights and config knobs.
+Complete system check validating the new config knobs and component loading.
 
 **Requirement:** Self-Forcing checkpoint.
 ```bash
@@ -107,6 +111,17 @@ CUDA_VISIBLE_DEVICES=0 uv run python test_with_weights.py
 **Config Knobs Validated:**
 - `pose_weights_path`: Path to the UniAnimate pose checkpoint. The lazy loader only triggers when this path is set.
 - `pose_weights_strict`: Boolean (defaults to `True`). Controls `state_dict` filtering and load strictness.
+
+---
+
+## Level 4.5: Lazy Pose-Weight Load (Real Checkpoint - GPU)
+
+Verifies that the lazy loader works with a **real** UniAnimate pose checkpoint.
+
+**Command:**
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python test_lazy_load.py --pose-weights-path /path/to/unianimate_pose_checkpoint.pt --strict
+```
 
 ---
 

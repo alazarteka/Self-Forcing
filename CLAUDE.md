@@ -67,6 +67,35 @@ huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir-use-symlinks False -
 huggingface-cli download gdhe17/Self-Forcing checkpoints/self_forcing_dmd.pt --local-dir .
 ```
 
+CLIP weights are sourced from the I2V repo:
+```bash
+huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth --local-dir wan_models/Wan2.1-T2V-1.3B
+```
+
+One-shot downloader (base + checkpoint + ODE + CLIP):
+```bash
+python download_models.py
+```
+
+### Testing
+
+See `testing_guide.md` for the full test ladder. Key checks:
+```bash
+uv run python test_wiring.py
+uv run python test_minimal.py
+CUDA_VISIBLE_DEVICES=0 uv run python test_load_model.py
+CUDA_VISIBLE_DEVICES=0 uv run python test_with_weights.py
+CUDA_VISIBLE_DEVICES=0 uv run python test_lazy_load.py --pose-weights-path /path/to/unianimate_pose_checkpoint.pt --strict
+```
+
+### Storage Notes (NFS / mmap)
+
+The T5 encoder is loaded with `map_location='cuda:0'` to avoid CPU memory-mapping issues on NFS.
+If running on local disk, copy the T5 checkpoint to `/tmp` (or `/dev/shm`) to improve reliability:
+```bash
+cp wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth /tmp/
+```
+
 ## Architecture Overview
 
 ### Core Innovation
