@@ -186,10 +186,7 @@ def test_model_loading(device):
                 noisy_image_or_video=noise.permute(0, 2, 1, 3, 4),
                 conditional_dict=conditional_dict,
                 timestep=torch.ones([batch_size, num_frames]).to(device),
-                kv_cache=None,
-                add_condition=None,
-                clip_feature=None,
-                y=None
+                kv_cache=None
             )
 
         print(f"  Input shape: {noise.shape}")

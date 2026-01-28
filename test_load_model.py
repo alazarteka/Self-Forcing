@@ -133,10 +133,7 @@ def main():
                 noisy_image_or_video=noise,  # [B, F, C, H, W]
                 conditional_dict=conditional_dict,
                 timestep=timestep,
-                kv_cache=None,  # No caching for this test
-                add_condition=None,
-                clip_feature=None,
-                y=None
+                kv_cache=None  # No caching for this test
             )
             # Unpack the tuple (flow_pred, cache)
             output = result[0] if isinstance(result, tuple) else result

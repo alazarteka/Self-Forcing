@@ -69,7 +69,7 @@ def main():
             print(f"Error processing {file}: {e}")
             continue
 
-        if data_dict["latents"].shape != (1, 21, 16, 60, 104):
+        if data_dict["latents"].shape != (1, 21, 16, 104, 60):
             continue
 
         shard_id = idx % num_shards

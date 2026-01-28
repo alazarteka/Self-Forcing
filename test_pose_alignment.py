@@ -17,10 +17,39 @@ def test_pose_frame_alignment():
         num_frames = 21
         num_frame_per_block = 3
         
-        # Simulate dwpose_data_emb from pipeline
-        # [B, C, F, H, W]
-        dwpose_data_emb = torch.randn(1, 5120, num_frames, 60, 104)
+        # Simulate UniAnimate-style pose embedding
+        # Input dwpose_data: [B, 3, 81, H, W] -> prepend 3 frames -> 84
+        # After dwpose_embedding, expect 21 frames
+        height = 64
+        width = 48
+        dwpose_data = torch.randn(1, 3, 81, height, width)
+        dwpose_input = torch.cat(
+            [dwpose_data[:, :, :1].repeat(1, 1, 3, 1, 1), dwpose_data], dim=2
+        )
+
+        # Create the same embedding stack used in the pipeline
+        concat_dim = 4
+        dwpose_embedding = torch.nn.Sequential(
+            torch.nn.Conv3d(3, concat_dim * 4, (3, 3, 3), stride=(1, 1, 1), padding=(1, 1, 1)),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, concat_dim * 4, (3, 3, 3), stride=(1, 1, 1), padding=(1, 1, 1)),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, concat_dim * 4, (3, 3, 3), stride=(1, 1, 1), padding=(1, 1, 1)),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, concat_dim * 4, (3, 3, 3), stride=(1, 2, 2), padding=(1, 1, 1)),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, concat_dim * 4, 3, stride=(2, 2, 2), padding=1),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, concat_dim * 4, 3, stride=(2, 2, 2), padding=1),
+            torch.nn.SiLU(),
+            torch.nn.Conv3d(concat_dim * 4, 5120, (1, 2, 2), stride=(1, 2, 2), padding=0),
+        )
+
+        dwpose_data_emb = dwpose_embedding(dwpose_input)
         print(f"✓ Created dummy pose embedding: {dwpose_data_emb.shape}")
+        if dwpose_data_emb.shape[2] != num_frames:
+            print(f"✗ ERROR: Expected {num_frames} frames, got {dwpose_data_emb.shape[2]}")
+            return False
 
         # Verification logic (as in pipeline)
         total_blocks = num_frames // num_frame_per_block

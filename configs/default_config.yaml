@@ -5,6 +5,11 @@ same_step_across_blocks: true
 discriminator_lr_multiplier: 1.0
 last_step_only: false
 i2v: false
+use_pose_conditioning: false
+pose_weights_path: null
+pose_weights_strict: true
+pose_drop_prob: 0.0
+clip_checkpoint_path: wan_models/Wan2.1-T2V-1.3B/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
 num_training_frames: 21
 gc_interval: 100
 context_noise: 0
@@ -15,6 +20,6 @@ prompt_name: MovieGenVideoBench
 prompt_path: prompts/MovieGenVideoBench.txt
 eval_first_n: 64
 num_samples: 1
-height: 480
-width: 832
+height: 832
+width: 480
 num_frames: 81

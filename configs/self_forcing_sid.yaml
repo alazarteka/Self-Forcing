@@ -31,6 +31,12 @@ beta1_critic: 0.0
 beta2_critic: 0.999
 weight_decay: 0.0
 data_path: prompts/vidprom_filtered_extended.txt
+i2v: true
+use_pose_conditioning: true
+pose_weights_path: checkpoints/UniAnimate-Wan2.1-14B-Lora-12000.ckpt
+pose_weights_strict: true
+pose_drop_prob: 0.05
+clip_checkpoint_path: checkpoints/Wan2.1-I2V-14B-720P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
 batch_size: 1
 sid_alpha: 1.0
 ema_weight: 0.99
@@ -43,8 +49,8 @@ image_or_video_shape:
 - 1
 - 21
 - 16
-- 60
 - 104
+- 60
 distribution_loss: dmd
 trainer: score_distillation
 gradient_checkpointing: true

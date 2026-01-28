@@ -14,7 +14,7 @@ def test_pose_only_behavior():
 
     try:
         # Simulate inputs
-        dwpose_data = torch.randn(1, 3, 21, 480, 832)  # [B, C, F, H, W]
+        dwpose_data = torch.randn(1, 3, 81, 832, 480)  # [B, C, F, H, W]
         random_ref_dwpose = None # Pose-only mode
         
         print(f"✓ Inputs: dwpose_data={dwpose_data.shape}, random_ref_dwpose={random_ref_dwpose}")

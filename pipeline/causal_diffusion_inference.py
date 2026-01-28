@@ -349,6 +349,12 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         # Extract image conditioning features to pass to model
         clip_feature = image_emb.get("clip_feature", None)
         y = image_emb.get("y", None)
+        if clip_feature is not None:
+            conditional_dict["clip_feature"] = clip_feature
+            unconditional_dict["clip_feature"] = clip_feature
+        if y is not None:
+            conditional_dict["y"] = y
+            unconditional_dict["y"] = y
 
         all_num_frames = [self.num_frame_per_block] * num_blocks
         if self.independent_first_frame and initial_latent is None:
@@ -385,6 +391,12 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     ).contiguous()
                 else:
                     condition = None
+                if condition is not None:
+                    conditional_dict["add_condition"] = condition
+                    unconditional_dict["add_condition"] = condition
+                else:
+                    conditional_dict.pop("add_condition", None)
+                    unconditional_dict.pop("add_condition", None)
 
                 flow_pred_cond, _ = self.generator(
                     noisy_image_or_video=latent_model_input,
@@ -393,10 +405,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length,
-                    add_condition = condition,
-                    clip_feature = clip_feature,
-                    y = y
+                    cache_start=cache_start_frame * self.frame_seq_length
                 )
                 flow_pred_uncond, _ = self.generator(
                     noisy_image_or_video=latent_model_input,
@@ -405,10 +414,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length,
-                    add_condition = None,
-                    clip_feature = clip_feature,
-                    y = y
+                    cache_start=cache_start_frame * self.frame_seq_length
                 )
 
                 flow_pred = flow_pred_uncond + self.args.guidance_scale * (
@@ -434,10 +440,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 kv_cache=self.kv_cache_pos,
                 crossattn_cache=self.crossattn_cache_pos,
                 current_start=current_start_frame * self.frame_seq_length,
-                cache_start=cache_start_frame * self.frame_seq_length,
-                add_condition = condition,
-                clip_feature = clip_feature,
-                y = y
+                cache_start=cache_start_frame * self.frame_seq_length
             )
             self.generator(
                 noisy_image_or_video=latents,
@@ -446,10 +449,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 kv_cache=self.kv_cache_neg,
                 crossattn_cache=self.crossattn_cache_neg,
                 current_start=current_start_frame * self.frame_seq_length,
-                cache_start=cache_start_frame * self.frame_seq_length,
-                add_condition = None,
-                clip_feature = clip_feature,
-                y = y
+                cache_start=cache_start_frame * self.frame_seq_length
             )
 
             # Step 3.4: update the start and end frame indices
