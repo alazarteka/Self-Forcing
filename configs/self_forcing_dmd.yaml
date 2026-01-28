@@ -64,6 +64,8 @@ lora_targets:
 - k
 - v
 - o
+- ffn.0
+- ffn.2
 model_kwargs:
   timestep_shift: 5.0
   lora_rank: 64
@@ -74,3 +76,5 @@ model_kwargs:
   - k
   - v
   - o
+  - ffn.0
+  - ffn.2

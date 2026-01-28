@@ -5,8 +5,8 @@ from typing import Iterable, Optional, Sequence, Tuple
 import torch
 from torch import nn
 
-from wan.modules.model import WanSelfAttention
-from wan.modules.causal_model import CausalWanSelfAttention
+from wan.modules.model import WanSelfAttention, WanAttentionBlock
+from wan.modules.causal_model import CausalWanSelfAttention, CausalWanAttentionBlock
 
 
 class LoRALinear(nn.Module):
@@ -105,18 +105,39 @@ def apply_lora(
     target_modules: Sequence[str] = ("q", "k", "v", "o"),
 ) -> int:
     replaced = 0
-    for module in model.modules():
-        if not isinstance(module, (WanSelfAttention, CausalWanSelfAttention)):
-            continue
-        for attr in target_modules:
-            layer = getattr(module, attr, None)
-            if isinstance(layer, LoRALinear):
+    attn_targets = [t for t in target_modules if not t.startswith("ffn.")]
+    ffn_targets = []
+    for target in target_modules:
+        if target.startswith("ffn."):
+            try:
+                ffn_targets.append(int(target.split(".", 1)[1]))
+            except (IndexError, ValueError):
                 continue
-            if isinstance(layer, nn.Linear):
-                setattr(module, attr, LoRALinear.from_linear(
-                    layer, rank=rank, alpha=alpha, dropout=dropout
-                ))
-                replaced += 1
+    for module in model.modules():
+        if isinstance(module, (WanSelfAttention, CausalWanSelfAttention)):
+            for attr in attn_targets:
+                layer = getattr(module, attr, None)
+                if isinstance(layer, LoRALinear):
+                    continue
+                if isinstance(layer, nn.Linear):
+                    setattr(module, attr, LoRALinear.from_linear(
+                        layer, rank=rank, alpha=alpha, dropout=dropout
+                    ))
+                    replaced += 1
+        if ffn_targets and isinstance(module, (WanAttentionBlock, CausalWanAttentionBlock)):
+            if not isinstance(module.ffn, nn.Sequential):
+                continue
+            for idx in ffn_targets:
+                if idx < 0 or idx >= len(module.ffn):
+                    continue
+                layer = module.ffn[idx]
+                if isinstance(layer, LoRALinear):
+                    continue
+                if isinstance(layer, nn.Linear):
+                    module.ffn[idx] = LoRALinear.from_linear(
+                        layer, rank=rank, alpha=alpha, dropout=dropout
+                    )
+                    replaced += 1
     return replaced
 
 
