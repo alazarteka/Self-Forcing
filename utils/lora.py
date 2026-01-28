@@ -142,39 +142,49 @@ def load_lora_weights(
             skipped += 1
             continue
 
-        mapped = _map_target_name(target, param_names)
-        target = mapped or target
-
-        candidates = [target]
-        if not target.endswith((".weight", ".bias")):
-            candidates.extend([f"{target}.weight", f"{target}.bias"])
-
-        expanded = []
-        for cand in candidates:
-            expanded.append(cand)
-            if cand.endswith(".weight"):
-                expanded.append(cand.replace(".weight", ".base.weight"))
-            if cand.endswith(".bias"):
-                expanded.append(cand.replace(".bias", ".base.bias"))
-
-        resolved = None
-        for cand in expanded:
-            if cand in param_names:
-                resolved = cand
+        module_target = target
+        for prefix in ("diffusion_model.", "model.", "pipe.dit.", "pipe."):
+            if module_target.startswith(prefix):
+                module_target = module_target[len(prefix):]
                 break
+        if module_target.endswith(".weight") or module_target.endswith(".bias"):
+            module_target = module_target.rsplit(".", 1)[0]
 
-        if resolved is None:
-            skipped += 1
-            continue
-
-        module_name = resolved.rsplit(".", 1)[0]
-        module = module_map.get(module_name)
-        if isinstance(module, nn.Linear) and module_name.endswith(".base"):
-            module = module_map.get(module_name[:-5], module)
-
+        module = module_map.get(module_target)
         if not isinstance(module, LoRALinear):
-            skipped += 1
-            continue
+            mapped = _map_target_name(target, param_names)
+            target = mapped or target
+
+            candidates = [target]
+            if not target.endswith((".weight", ".bias")):
+                candidates.extend([f"{target}.weight", f"{target}.bias"])
+
+            expanded = []
+            for cand in candidates:
+                expanded.append(cand)
+                if cand.endswith(".weight"):
+                    expanded.append(cand.replace(".weight", ".base.weight"))
+                if cand.endswith(".bias"):
+                    expanded.append(cand.replace(".bias", ".base.bias"))
+
+            resolved = None
+            for cand in expanded:
+                if cand in param_names:
+                    resolved = cand
+                    break
+
+            if resolved is None:
+                skipped += 1
+                continue
+
+            module_name = resolved.rsplit(".", 1)[0]
+            module = module_map.get(module_name)
+            if isinstance(module, nn.Linear) and module_name.endswith(".base"):
+                module = module_map.get(module_name[:-5], module)
+
+            if not isinstance(module, LoRALinear):
+                skipped += 1
+                continue
 
         device = module.lora_A.weight.device
         dtype = module.lora_A.weight.dtype
