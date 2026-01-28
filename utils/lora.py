@@ -146,13 +146,19 @@ def load_lora_weights(
         target = mapped or target
 
         candidates = [target]
-        if target.endswith(".weight"):
-            candidates.append(target.replace(".weight", ".base.weight"))
-        if target.endswith(".bias"):
-            candidates.append(target.replace(".bias", ".base.bias"))
+        if not target.endswith((".weight", ".bias")):
+            candidates.extend([f"{target}.weight", f"{target}.bias"])
+
+        expanded = []
+        for cand in candidates:
+            expanded.append(cand)
+            if cand.endswith(".weight"):
+                expanded.append(cand.replace(".weight", ".base.weight"))
+            if cand.endswith(".bias"):
+                expanded.append(cand.replace(".bias", ".base.bias"))
 
         resolved = None
-        for cand in candidates:
+        for cand in expanded:
             if cand in param_names:
                 resolved = cand
                 break
