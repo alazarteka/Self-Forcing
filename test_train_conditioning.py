@@ -7,10 +7,29 @@ Verifies that add_condition is accepted in the non-cached training forward.
 import sys
 import torch
 
-from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
+from utils.wan_wrapper import WanDiffusionWrapper
+
+
+class MockTextEncoder:
+    def __init__(self, device, dtype):
+        self.device = device
+        self.dtype = dtype
+
+    def __call__(self, text_prompts):
+        # Match WanTextEncoder output structure: prompt_embeds [B, 512, 4096]
+        batch = len(text_prompts)
+        return {
+            "prompt_embeds": torch.randn(
+                batch, 512, 4096, device=self.device, dtype=self.dtype
+            )
+        }
 
 
 def main():
+    # Disable torch.compile to avoid triton/setuptools issues
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+
     if not torch.cuda.is_available():
         print("CUDA is required for this test.")
         return 1
@@ -27,13 +46,19 @@ def main():
 
     model = WanDiffusionWrapper(is_causal=True).to(device)
     model.model.eval()
+    param_dtype = next(model.parameters()).dtype
 
-    text_encoder = WanTextEncoder()
     prompts = ["A person walking in the park"]
-    conditional_dict = text_encoder(prompts)
+    conditional_dict = MockTextEncoder(device=device, dtype=param_dtype)(prompts)
 
     noise = torch.randn(
-        batch_size, num_frames, num_channels, height, width, device=device
+        batch_size,
+        num_frames,
+        num_channels,
+        height,
+        width,
+        device=device,
+        dtype=param_dtype,
     )
     timestep = torch.ones([batch_size, num_frames], device=device).float()
 
@@ -54,9 +79,14 @@ def main():
             kv_cache=None
         )
 
+    if isinstance(output, tuple):
+        flow_pred = output[0]
+    else:
+        flow_pred = output
+
     expected = (batch_size, num_frames, num_channels, height, width)
-    print(f"Output shape: {output.shape}")
-    if output.shape != expected:
+    print(f"Output shape: {flow_pred.shape}")
+    if flow_pred.shape != expected:
         print(f"❌ Shape mismatch: expected {expected}")
         return 1
 
