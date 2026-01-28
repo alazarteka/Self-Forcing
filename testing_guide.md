@@ -39,11 +39,22 @@ uv run python test_wiring.py
 
 ## Level 1.5: Pose Alignment (CPU)
 
-Asserts that pose frames match the output timeline. This catches preprocessing mistakes early.
+Asserts that UniAnimate-style pose frames (81 + 3 prepend) map to 21 latent frames and align with block slicing.
 
 **Command:**
 ```bash
 uv run python test_pose_alignment.py
+```
+
+---
+
+## Level 1.6: Train-path Conditioning (GPU)
+
+Verifies that `add_condition` is accepted in the non-cached training forward.
+
+**Command:**
+```bash
+uv run python test_train_conditioning.py
 ```
 
 ---
