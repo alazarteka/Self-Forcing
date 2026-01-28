@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
+from utils.lora import apply_lora, load_lora_weights
 from wan.modules.tokenizers import HuggingfaceTokenizer
 from wan.modules.model import WanModel, RegisterTokens, GanAttentionBlock
 from wan.modules.vae import _video_vae
@@ -124,7 +125,12 @@ class WanDiffusionWrapper(torch.nn.Module):
             timestep_shift=8.0,
             is_causal=False,
             local_attn_size=-1,
-            sink_size=0
+            sink_size=0,
+            lora_rank: Optional[int] = None,
+            lora_alpha: float = 1.0,
+            lora_dropout: float = 0.0,
+            lora_targets: Optional[List[str]] = None,
+            lora_path: Optional[str] = None,
     ):
         super().__init__()
 
@@ -139,6 +145,24 @@ class WanDiffusionWrapper(torch.nn.Module):
                 torch_dtype=torch.bfloat16)  # Load weights in bfloat16 to match inference dtype
         else:
             self.model = WanModel.from_pretrained(model_path)
+        if lora_rank is not None and lora_rank > 0:
+            targets = lora_targets or ["q", "k", "v", "o"]
+            replaced = apply_lora(
+                self.model,
+                rank=lora_rank,
+                alpha=lora_alpha,
+                dropout=lora_dropout,
+                target_modules=targets,
+            )
+            print(f"Applied LoRA to {replaced} layers.")
+            if lora_path is not None:
+                loaded, skipped = load_lora_weights(
+                    self.model,
+                    lora_path=lora_path,
+                    alpha=lora_alpha,
+                )
+                print(f"Loaded LoRA weights: {loaded} (skipped {skipped}).")
+
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep

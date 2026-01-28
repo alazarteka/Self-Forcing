@@ -4,6 +4,7 @@ real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
 real_name: Wan2.1-I2V-14B-720P
 real_model_path: checkpoints/Wan2.1-I2V-14B-720P
+real_lora_path: checkpoints/UniAnimate-Wan2.1-14B-Lora-12000.ckpt
 text_encoder_fsdp_wrap_strategy: size
 denoising_step_list:
 - 1000
@@ -54,5 +55,22 @@ trainer: score_distillation
 gradient_checkpointing: true
 num_frame_per_block: 3
 load_raw_video: false
+train_lora_only: true
+lora_rank: 64
+lora_alpha: 64
+lora_dropout: 0.0
+lora_targets:
+- q
+- k
+- v
+- o
 model_kwargs:
   timestep_shift: 5.0
+  lora_rank: 64
+  lora_alpha: 64
+  lora_dropout: 0.0
+  lora_targets:
+  - q
+  - k
+  - v
+  - o

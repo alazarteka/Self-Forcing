@@ -28,13 +28,59 @@ class BaseModel(nn.Module):
         self.fake_model_name = getattr(args, "fake_name", "Wan2.1-T2V-1.3B")
         self.real_model_path = getattr(args, "real_model_path", None)
         self.fake_model_path = getattr(args, "fake_model_path", None)
+        self.real_lora_path = getattr(args, "real_lora_path", None)
+        self.lora_rank = getattr(args, "lora_rank", None)
+        self.lora_alpha = getattr(args, "lora_alpha", 1.0)
+        self.lora_dropout = getattr(args, "lora_dropout", 0.0)
+        self.lora_targets = getattr(args, "lora_targets", None)
+        self.train_lora_only = getattr(args, "train_lora_only", False)
 
         self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
-        self.generator.model.requires_grad_(True)
+        if self.train_lora_only and (self.lora_rank is not None and self.lora_rank > 0):
+            from utils.lora import mark_only_lora_as_trainable
+
+            mark_only_lora_as_trainable(
+                self.generator.model,
+                extra_trainable_keywords=("pose_proj",),
+            )
+            if (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0:
+                trainable = {
+                    name: param for name, param in self.generator.model.named_parameters()
+                    if param.requires_grad
+                }
+                trainable_count = sum(param.numel() for param in trainable.values())
+                lora_count = sum(
+                    param.numel()
+                    for name, param in trainable.items()
+                    if "lora_A" in name or "lora_B" in name
+                )
+                pose_proj_count = sum(
+                    param.numel()
+                    for name, param in trainable.items()
+                    if "pose_proj" in name
+                )
+                print(
+                    f"Trainable params (LoRA-only): {trainable_count} "
+                    f"(LoRA {lora_count}, pose_proj {pose_proj_count})"
+                )
+                unexpected = [
+                    name for name in trainable
+                    if "lora_A" not in name and "lora_B" not in name and "pose_proj" not in name
+                ]
+                if unexpected:
+                    preview = ", ".join(unexpected[:5])
+                    print(f"WARNING: unexpected trainable params (showing up to 5): {preview}")
+        else:
+            self.generator.model.requires_grad_(True)
 
         self.real_score = WanDiffusionWrapper(
             model_name=self.real_model_name,
             model_path=self.real_model_path,
+            lora_rank=self.lora_rank,
+            lora_alpha=self.lora_alpha,
+            lora_dropout=self.lora_dropout,
+            lora_targets=self.lora_targets,
+            lora_path=self.real_lora_path,
             is_causal=False
         )
         self.real_score.model.requires_grad_(False)
