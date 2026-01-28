@@ -120,6 +120,7 @@ class WanDiffusionWrapper(torch.nn.Module):
     def __init__(
             self,
             model_name="Wan2.1-T2V-1.3B",
+            model_path: Optional[str] = None,
             timestep_shift=8.0,
             is_causal=False,
             local_attn_size=-1,
