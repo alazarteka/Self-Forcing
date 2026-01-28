@@ -124,6 +124,78 @@ class ShardingLMDBDataset(Dataset):
         }
 
 
+class PoseShardingLMDBDataset(Dataset):
+    def __init__(self, data_path: str, max_pair: int = int(1e8)):
+        self.envs = []
+        self.index = []
+
+        for fname in sorted(os.listdir(data_path)):
+            path = os.path.join(data_path, fname)
+            env = lmdb.open(path,
+                            readonly=True,
+                            lock=False,
+                            readahead=False,
+                            meminit=False)
+            self.envs.append(env)
+
+        self.latents_shape = [None] * len(self.envs)
+        self.dwpose_shape = [None] * len(self.envs)
+        self.random_ref_shape = [None] * len(self.envs)
+        self.first_frame_shape = [None] * len(self.envs)
+        for shard_id, env in enumerate(self.envs):
+            self.latents_shape[shard_id] = get_array_shape_from_lmdb(env, "latents")
+            self.dwpose_shape[shard_id] = get_array_shape_from_lmdb(env, "dwpose_data")
+            self.random_ref_shape[shard_id] = get_array_shape_from_lmdb(env, "random_ref_dwpose")
+            self.first_frame_shape[shard_id] = get_array_shape_from_lmdb(env, "first_frame")
+            for local_i in range(self.latents_shape[shard_id][0]):
+                self.index.append((shard_id, local_i))
+
+        self.max_pair = max_pair
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        shard_id, local_idx = self.index[idx]
+
+        latents = retrieve_row_from_lmdb(
+            self.envs[shard_id],
+            "latents", np.float16, local_idx,
+            shape=self.latents_shape[shard_id][1:]
+        )
+        if len(latents.shape) == 4:
+            latents = latents[None, ...]
+
+        prompts = retrieve_row_from_lmdb(
+            self.envs[shard_id],
+            "prompts", str, local_idx
+        )
+
+        dwpose_data = retrieve_row_from_lmdb(
+            self.envs[shard_id],
+            "dwpose_data", np.uint8, local_idx,
+            shape=self.dwpose_shape[shard_id][1:]
+        )
+        random_ref_dwpose = retrieve_row_from_lmdb(
+            self.envs[shard_id],
+            "random_ref_dwpose", np.uint8, local_idx,
+            shape=self.random_ref_shape[shard_id][1:]
+        )
+        first_frame = retrieve_row_from_lmdb(
+            self.envs[shard_id],
+            "first_frame", np.uint8, local_idx,
+            shape=self.first_frame_shape[shard_id][1:]
+        )
+
+        return {
+            "prompts": prompts,
+            "ode_latent": torch.tensor(latents, dtype=torch.float32),
+            "dwpose_data": torch.tensor(dwpose_data, dtype=torch.uint8),
+            "random_ref_dwpose": torch.tensor(random_ref_dwpose, dtype=torch.uint8),
+            "first_frame": torch.tensor(first_frame, dtype=torch.uint8),
+        }
+
+
 class TextImagePairDataset(Dataset):
     def __init__(
         self,
