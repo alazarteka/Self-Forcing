@@ -128,16 +128,17 @@ class WanDiffusionWrapper(torch.nn.Module):
     ):
         super().__init__()
 
+        model_path = model_path or f"wan_models/{model_name}/"
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/",
+                model_path,
                 local_attn_size=local_attn_size,
                 sink_size=sink_size,
                 low_cpu_mem_usage=False,
                 device_map=None,
                 torch_dtype=torch.bfloat16)  # Load weights in bfloat16 to match inference dtype
         else:
-            self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
+            self.model = WanModel.from_pretrained(model_path)
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep
@@ -241,6 +242,16 @@ class WanDiffusionWrapper(torch.nn.Module):
         y: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         prompt_embeds = conditional_dict["prompt_embeds"]
+        if add_condition is None:
+            add_condition = conditional_dict.get("add_condition")
+        if clip_feature is None:
+            clip_feature = conditional_dict.get("clip_feature")
+        if y is None:
+            y = conditional_dict.get("y")
+        supports_add_condition = isinstance(self.model, CausalWanModel)
+        extra_kwargs = {}
+        if supports_add_condition:
+            extra_kwargs["add_condition"] = add_condition
 
         # [B, F] -> [B]
         if self.uniform_timestep:
@@ -272,6 +283,9 @@ class WanDiffusionWrapper(torch.nn.Module):
                     seq_len=self.seq_len,
                     clean_x=clean_x.permute(0, 2, 1, 3, 4),
                     aug_t=aug_t,
+                    clip_fea=clip_feature,
+                    y=y,
+                    **extra_kwargs
                 ).permute(0, 2, 1, 3, 4)
             else:
                 if classify_mode:
@@ -283,14 +297,20 @@ class WanDiffusionWrapper(torch.nn.Module):
                         register_tokens=self._register_tokens,
                         cls_pred_branch=self._cls_pred_branch,
                         gan_ca_blocks=self._gan_ca_blocks,
-                        concat_time_embeddings=concat_time_embeddings
+                        concat_time_embeddings=concat_time_embeddings,
+                        clip_fea=clip_feature,
+                        y=y,
+                        **extra_kwargs
                     )
                     flow_pred = flow_pred.permute(0, 2, 1, 3, 4)
                 else:
                     flow_pred = self.model(
                         noisy_image_or_video.permute(0, 2, 1, 3, 4),
                         t=input_timestep, context=prompt_embeds,
-                        seq_len=self.seq_len
+                        seq_len=self.seq_len,
+                        clip_fea=clip_feature,
+                        y=y,
+                        **extra_kwargs
                     ).permute(0, 2, 1, 3, 4)
 
         pred_x0 = self._convert_flow_pred_to_x0(

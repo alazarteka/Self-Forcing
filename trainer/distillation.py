@@ -1,13 +1,14 @@
 import gc
 import logging
 
-from utils.dataset import ShardingLMDBDataset, cycle
+from utils.dataset import ShardingLMDBDataset, PoseShardingLMDBDataset, cycle
 from utils.dataset import TextDataset
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import (
     set_seed,
     merge_dict_list
 )
+from utils.conditioning import PoseImageConditioner
 import torch.distributed as dist
 from omegaconf import OmegaConf
 from model import CausVid, DMD, SiD
@@ -102,6 +103,23 @@ class Trainer:
         if not config.no_visualize or config.load_raw_video:
             self.model.vae = self.model.vae.to(
                 device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
+        if getattr(config, "use_pose_conditioning", False):
+            self.model.vae = self.model.vae.to(
+                device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
+            self.pose_conditioner = PoseImageConditioner(
+                device=self.device,
+                dtype=self.dtype,
+                pose_weights_path=getattr(config, "pose_weights_path", None),
+                pose_weights_strict=getattr(config, "pose_weights_strict", True),
+                clip_checkpoint_path=getattr(
+                    config,
+                    "clip_checkpoint_path",
+                    "wan_models/Wan2.1-T2V-1.3B/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"
+                ),
+                vae=self.model.vae
+            )
+        else:
+            self.pose_conditioner = None
 
         self.generator_optimizer = torch.optim.AdamW(
             [param for param in self.model.generator.parameters()
@@ -121,7 +139,10 @@ class Trainer:
 
         # Step 3: Initialize the dataloader
         if self.config.i2v:
-            dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
+            if getattr(config, "use_pose_conditioning", False):
+                dataset = PoseShardingLMDBDataset(config.data_path, max_pair=int(1e8))
+            else:
+                dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         else:
             dataset = TextDataset(config.data_path)
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -228,17 +249,30 @@ class Trainer:
 
         # Step 2: Extract the conditional infos
         with torch.no_grad():
-            conditional_dict = self.model.text_encoder(
-                text_prompts=text_prompts)
+            conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
 
             if not getattr(self, "unconditional_dict", None):
                 unconditional_dict = self.model.text_encoder(
-                    text_prompts=[self.config.negative_prompt] * batch_size)
-                unconditional_dict = {k: v.detach()
-                                      for k, v in unconditional_dict.items()}
+                    text_prompts=[self.config.negative_prompt] * batch_size
+                )
+                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
                 self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
+        conditional_dict = dict(conditional_dict)
+        unconditional_dict = dict(unconditional_dict)
+        if self.pose_conditioner is not None:
+            conditioning = self.pose_conditioner.build_conditioning(
+                first_frame=batch["first_frame"],
+                dwpose_data=batch["dwpose_data"],
+                random_ref_dwpose=batch["random_ref_dwpose"],
+                num_frames=image_or_video_shape[1],
+                height=image_or_video_shape[3] * 8,
+                width=image_or_video_shape[4] * 8,
+                pose_drop_prob=getattr(self.config, "pose_drop_prob", 0.0)
+            )
+            conditional_dict.update(conditioning)
+            unconditional_dict.update(conditioning)
 
         # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:

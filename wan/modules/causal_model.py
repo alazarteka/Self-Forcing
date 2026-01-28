@@ -902,6 +902,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         aug_t=None,
         clip_fea=None,
         y=None,
+        add_condition: Optional[torch.Tensor] = None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -974,6 +975,23 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             torch.cat([u, u.new_zeros(1, seq_lens[0] - u.size(1), u.size(2))],
                       dim=1) for u in x
         ])
+
+        # Handle pose conditioning (same logic as inference path)
+        if add_condition is not None:
+            add_condition = add_condition.to(device=x.device, dtype=x.dtype)
+            # add_condition: [B, L_pose, 5120] -> [B, L_pose, dim]
+            add_condition_dtype = add_condition.dtype
+            proj_weight = getattr(self.pose_proj, "weight", None)
+            proj_dtype = proj_weight.dtype if proj_weight is not None else add_condition_dtype
+            add_condition = self.pose_proj(add_condition.to(proj_dtype))
+            add_condition = add_condition.to(add_condition_dtype)
+
+            if add_condition.shape[1] != x.shape[1]:
+                raise ValueError(
+                    f"add_condition spatial dim {add_condition.shape[1]} doesn't match "
+                    f"x spatial dim {x.shape[1]}. Check pose data processing."
+                )
+            x = x + add_condition
 
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
