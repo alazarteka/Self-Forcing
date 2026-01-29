@@ -58,8 +58,8 @@ gradient_checkpointing: true
 num_frame_per_block: 3
 load_raw_video: false
 train_lora_only: true
-lora_rank: 64
-lora_alpha: 64
+lora_rank: 128
+lora_alpha: 128
 lora_dropout: 0.0
 lora_targets:
 - q
@@ -70,8 +70,8 @@ lora_targets:
 - ffn.2
 model_kwargs:
   timestep_shift: 5.0
-  lora_rank: 64
-  lora_alpha: 64
+  lora_rank: 128
+  lora_alpha: 128
   lora_dropout: 0.0
   lora_targets:
   - q
