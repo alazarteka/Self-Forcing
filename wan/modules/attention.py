@@ -174,6 +174,7 @@ def attention(
             )
         attn_mask = None
 
+        out_dtype = q.dtype
         q = q.transpose(1, 2).to(dtype)
         k = k.transpose(1, 2).to(dtype)
         v = v.transpose(1, 2).to(dtype)
@@ -182,4 +183,4 @@ def attention(
             q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
 
         out = out.transpose(1, 2).contiguous()
-        return out
+        return out.type(out_dtype)

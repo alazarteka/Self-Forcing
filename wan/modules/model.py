@@ -7,7 +7,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from einops import repeat
 
-from .attention import flash_attention
+from wan.modules.attention import attention
 
 __all__ = ['WanModel']
 
@@ -143,12 +143,14 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
+        # TODO: return to flash attention after testing
+        x = attention(
             q=rope_apply(q, grid_sizes, freqs),
             k=rope_apply(k, grid_sizes, freqs),
             v=v,
             k_lens=seq_lens,
-            window_size=self.window_size)
+            window_size=self.window_size,
+        )
 
         # output
         x = x.flatten(2)
@@ -186,7 +188,8 @@ class WanT2VCrossAttention(WanSelfAttention):
             v = self.v(context).view(b, -1, n, d)
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        # TODO: return to flash attention after testing
+        x = attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)
@@ -213,7 +216,8 @@ class WanGanCrossAttention(WanSelfAttention):
         vv = self.v(x).view(b, -1, n, d)
 
         # compute attention
-        x = flash_attention(qq, kk, vv)
+        # TODO: return to flash attention after testing
+        x = attention(qq, kk, vv)
 
         # output
         x = x.flatten(2)
@@ -254,9 +258,11 @@ class WanI2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
-        img_x = flash_attention(q, k_img, v_img, k_lens=None)
+        # TODO: return to flash attention after testing
+        img_x = attention(q, k_img, v_img, k_lens=None)
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        # TODO: return to flash attention after testing
+        x = attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)

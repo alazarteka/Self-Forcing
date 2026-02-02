@@ -9,6 +9,7 @@ from wan.modules.model import WanModel, RegisterTokens, GanAttentionBlock
 from wan.modules.vae import _video_vae
 from wan.modules.t5 import umt5_xxl
 from wan.modules.causal_model import CausalWanModel
+from wan.modules.causal_vace_model import CausalVaceWanModel
 
 
 class WanTextEncoder(torch.nn.Module):
@@ -119,13 +120,28 @@ class WanDiffusionWrapper(torch.nn.Module):
             timestep_shift=8.0,
             is_causal=False,
             local_attn_size=-1,
-            sink_size=0
+            sink_size=0,
+            use_vace: bool = False,
+            vace_layers=None,
+            vace_in_dim=None,
     ):
         super().__init__()
 
+        self.use_vace = use_vace
         if is_causal:
-            self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+            if use_vace:
+                self.model = CausalVaceWanModel.from_pretrained(
+                    f"wan_models/{model_name}/",
+                    local_attn_size=local_attn_size,
+                    sink_size=sink_size,
+                    vace_layers=vace_layers,
+                    vace_in_dim=vace_in_dim,
+                    low_cpu_mem_usage=False,
+                    device_map=None,
+                )
+            else:
+                self.model = CausalWanModel.from_pretrained(
+                    f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
         else:
             self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
         self.model.eval()
@@ -225,7 +241,11 @@ class WanDiffusionWrapper(torch.nn.Module):
         concat_time_embeddings: Optional[bool] = False,
         clean_x: Optional[torch.Tensor] = None,
         aug_t: Optional[torch.Tensor] = None,
-        cache_start: Optional[int] = None
+        cache_start: Optional[int] = None,
+        vace_context: Optional[torch.Tensor] = None,
+        vace_context_scale: float = 1.0,
+        vace_kv_cache: Optional[List[dict]] = None,
+        vace_crossattn_cache: Optional[List[dict]] = None,
     ) -> torch.Tensor:
         prompt_embeds = conditional_dict["prompt_embeds"]
 
@@ -236,16 +256,32 @@ class WanDiffusionWrapper(torch.nn.Module):
             input_timestep = timestep
 
         logits = None
+        vace_context_model = None
+        if vace_context is not None:
+            vace_context_model = vace_context.permute(0, 2, 1, 3, 4)
         # X0 prediction
         if kv_cache is not None:
-            flow_pred = self.model(
-                noisy_image_or_video.permute(0, 2, 1, 3, 4),
-                t=input_timestep, context=prompt_embeds,
+            model_kwargs = dict(
+                t=input_timestep,
+                context=prompt_embeds,
                 seq_len=self.seq_len,
                 kv_cache=kv_cache,
                 crossattn_cache=crossattn_cache,
                 current_start=current_start,
-                cache_start=cache_start
+                cache_start=cache_start,
+            )
+            if self.use_vace and vace_context_model is not None:
+                model_kwargs.update(
+                    dict(
+                        vace_context=vace_context_model,
+                        vace_context_scale=vace_context_scale,
+                        vace_kv_cache=vace_kv_cache,
+                        vace_crossattn_cache=vace_crossattn_cache,
+                    )
+                )
+            flow_pred = self.model(
+                noisy_image_or_video.permute(0, 2, 1, 3, 4),
+                **model_kwargs,
             ).permute(0, 2, 1, 3, 4)
         else:
             if clean_x is not None:
