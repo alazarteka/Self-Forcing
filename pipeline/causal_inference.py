@@ -30,10 +30,12 @@ class CausalInferencePipeline(torch.nn.Module):
             timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
-        self.num_transformer_blocks = 30
-        self.frame_seq_length = 1560
+        self.num_transformer_blocks = getattr(self.generator.model, "num_layers", 30)
+        self.frame_seq_length = None
 
         self.kv_cache1 = None
+        self.vace_kv_cache = None
+        self.vace_crossattn_cache = None
         self.args = args
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
         self.independent_first_frame = args.independent_first_frame
@@ -49,6 +51,8 @@ class CausalInferencePipeline(torch.nn.Module):
         noise: torch.Tensor,
         text_prompts: List[str],
         initial_latent: Optional[torch.Tensor] = None,
+        vace_context: Optional[torch.Tensor] = None,
+        vace_context_scale: float = 1.0,
         return_latents: bool = False,
         profile: bool = False,
         low_memory: bool = False,
@@ -70,6 +74,15 @@ class CausalInferencePipeline(torch.nn.Module):
                 It is normalized to be in the range [0, 1].
         """
         batch_size, num_frames, num_channels, height, width = noise.shape
+        frame_seq_length = (height // self.generator.model.patch_size[1]) * (width // self.generator.model.patch_size[2])
+        if self.frame_seq_length is None:
+            self.frame_seq_length = frame_seq_length
+        elif self.frame_seq_length != frame_seq_length:
+            raise ValueError(
+                f"frame_seq_length mismatch: cached={self.frame_seq_length}, got={frame_seq_length}. "
+                "This pipeline assumes a fixed latent resolution per instance."
+            )
+
         if not self.independent_first_frame or (self.independent_first_frame and initial_latent is not None):
             # If the first frame is independent and the first frame is provided, then the number of frames in the
             # noise should still be a multiple of num_frame_per_block
@@ -94,6 +107,46 @@ class CausalInferencePipeline(torch.nn.Module):
             device=noise.device,
             dtype=noise.dtype
         )
+
+        vace_context_full = None
+        if vace_context is not None:
+            if not getattr(self.generator, "use_vace", False):
+                raise ValueError("vace_context was provided but the generator was not initialized with use_vace=True.")
+            if not isinstance(vace_context, torch.Tensor) or vace_context.ndim != 5:
+                raise TypeError("vace_context must be a torch.Tensor with shape [B, F, C, H, W].")
+            if vace_context.shape[0] != batch_size:
+                raise ValueError(f"vace_context batch size mismatch: expected {batch_size}, got {vace_context.shape[0]}.")
+            if vace_context.shape[-2:] != (height, width):
+                raise ValueError(
+                    f"vace_context spatial size mismatch: expected {(height, width)}, got {tuple(vace_context.shape[-2:])}."
+                )
+            if vace_context.device != noise.device or vace_context.dtype != noise.dtype:
+                vace_context = vace_context.to(device=noise.device, dtype=noise.dtype)
+
+            if vace_context.shape[1] == num_output_frames:
+                vace_context_full = vace_context
+            elif vace_context.shape[1] == num_frames:
+                if num_input_frames > 0:
+                    pad = torch.zeros(
+                        [batch_size, num_input_frames, vace_context.shape[2], height, width],
+                        device=noise.device,
+                        dtype=noise.dtype,
+                    )
+                    vace_context_full = torch.cat([pad, vace_context], dim=1)
+                else:
+                    vace_context_full = vace_context
+            else:
+                raise ValueError(
+                    f"vace_context has {vace_context.shape[1]} frames, but expected {num_frames} (noise) or "
+                    f"{num_output_frames} (output incl. initial_latent)."
+                )
+
+            expected_vace_in_dim = getattr(self.generator.model, "vace_in_dim", None)
+            if expected_vace_in_dim is not None and vace_context_full.shape[2] != expected_vace_in_dim:
+                raise ValueError(
+                    f"vace_context has C={vace_context_full.shape[2]}, but model expects vace_in_dim={expected_vace_in_dim}. "
+                    "Set args.model_kwargs.vace_in_dim to match your VACE context."
+                )
 
         # Set up profiling if requested
         if profile:
@@ -122,7 +175,7 @@ class CausalInferencePipeline(torch.nn.Module):
             )
         else:
             # reset cross attn cache
-            for block_index in range(self.num_transformer_blocks):
+            for block_index in range(len(self.crossattn_cache)):
                 self.crossattn_cache[block_index]["is_init"] = False
             # reset kv cache
             for block_index in range(len(self.kv_cache1)):
@@ -131,23 +184,53 @@ class CausalInferencePipeline(torch.nn.Module):
                 self.kv_cache1[block_index]["local_end_index"] = torch.tensor(
                     [0], dtype=torch.long, device=noise.device)
 
+        if vace_context_full is not None:
+            if self.vace_kv_cache is None or self.vace_crossattn_cache is None:
+                self._initialize_vace_kv_cache(
+                    batch_size=batch_size,
+                    dtype=noise.dtype,
+                    device=noise.device,
+                )
+                self._initialize_vace_crossattn_cache(
+                    batch_size=batch_size,
+                    dtype=noise.dtype,
+                    device=noise.device,
+                )
+            else:
+                for block_index in range(len(self.vace_crossattn_cache)):
+                    self.vace_crossattn_cache[block_index]["is_init"] = False
+                for block_index in range(len(self.vace_kv_cache)):
+                    self.vace_kv_cache[block_index]["global_end_index"] = torch.tensor(
+                        [0], dtype=torch.long, device=noise.device)
+                    self.vace_kv_cache[block_index]["local_end_index"] = torch.tensor(
+                        [0], dtype=torch.long, device=noise.device)
+
         # Step 2: Cache context feature
         current_start_frame = 0
         if initial_latent is not None:
-            timestep = torch.ones([batch_size, 1], device=noise.device, dtype=torch.int64) * 0
             if self.independent_first_frame:
                 # Assume num_input_frames is 1 + self.num_frame_per_block * num_input_blocks
                 assert (num_input_frames - 1) % self.num_frame_per_block == 0
                 num_input_blocks = (num_input_frames - 1) // self.num_frame_per_block
                 output[:, :1] = initial_latent[:, :1]
-                self.generator(
+                gen_kwargs = dict(
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=conditional_dict,
-                    timestep=timestep * 0,
+                    timestep=torch.zeros([batch_size, 1], device=noise.device, dtype=torch.int64),
                     kv_cache=self.kv_cache1,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
                 )
+                if vace_context_full is not None:
+                    gen_kwargs.update(
+                        dict(
+                            vace_context=vace_context_full[:, current_start_frame: current_start_frame + 1],
+                            vace_context_scale=vace_context_scale,
+                            vace_kv_cache=self.vace_kv_cache,
+                            vace_crossattn_cache=self.vace_crossattn_cache,
+                        )
+                    )
+                self.generator(**gen_kwargs)
                 current_start_frame += 1
             else:
                 # Assume num_input_frames is self.num_frame_per_block * num_input_blocks
@@ -158,14 +241,26 @@ class CausalInferencePipeline(torch.nn.Module):
                 current_ref_latents = \
                     initial_latent[:, current_start_frame:current_start_frame + self.num_frame_per_block]
                 output[:, current_start_frame:current_start_frame + self.num_frame_per_block] = current_ref_latents
-                self.generator(
+                gen_kwargs = dict(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
-                    timestep=timestep * 0,
+                    timestep=torch.zeros([batch_size, self.num_frame_per_block], device=noise.device, dtype=torch.int64),
                     kv_cache=self.kv_cache1,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
                 )
+                if vace_context_full is not None:
+                    gen_kwargs.update(
+                        dict(
+                            vace_context=vace_context_full[
+                                :, current_start_frame: current_start_frame + self.num_frame_per_block
+                            ],
+                            vace_context_scale=vace_context_scale,
+                            vace_kv_cache=self.vace_kv_cache,
+                            vace_crossattn_cache=self.vace_crossattn_cache,
+                        )
+                    )
+                self.generator(**gen_kwargs)
                 current_start_frame += self.num_frame_per_block
 
         if profile:
@@ -194,14 +289,26 @@ class CausalInferencePipeline(torch.nn.Module):
                     dtype=torch.int64) * current_timestep
 
                 if index < len(self.denoising_step_list) - 1:
-                    _, denoised_pred = self.generator(
+                    gen_kwargs = dict(
                         noisy_image_or_video=noisy_input,
                         conditional_dict=conditional_dict,
                         timestep=timestep,
                         kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length
+                        current_start=current_start_frame * self.frame_seq_length,
                     )
+                    if vace_context_full is not None:
+                        gen_kwargs.update(
+                            dict(
+                                vace_context=vace_context_full[
+                                    :, current_start_frame: current_start_frame + current_num_frames
+                                ],
+                                vace_context_scale=vace_context_scale,
+                                vace_kv_cache=self.vace_kv_cache,
+                                vace_crossattn_cache=self.vace_crossattn_cache,
+                            )
+                        )
+                    _, denoised_pred = self.generator(**gen_kwargs)
                     next_timestep = self.denoising_step_list[index + 1]
                     noisy_input = self.scheduler.add_noise(
                         denoised_pred.flatten(0, 1),
@@ -211,21 +318,33 @@ class CausalInferencePipeline(torch.nn.Module):
                     ).unflatten(0, denoised_pred.shape[:2])
                 else:
                     # for getting real output
-                    _, denoised_pred = self.generator(
+                    gen_kwargs = dict(
                         noisy_image_or_video=noisy_input,
                         conditional_dict=conditional_dict,
                         timestep=timestep,
                         kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length
+                        current_start=current_start_frame * self.frame_seq_length,
                     )
+                    if vace_context_full is not None:
+                        gen_kwargs.update(
+                            dict(
+                                vace_context=vace_context_full[
+                                    :, current_start_frame: current_start_frame + current_num_frames
+                                ],
+                                vace_context_scale=vace_context_scale,
+                                vace_kv_cache=self.vace_kv_cache,
+                                vace_crossattn_cache=self.vace_crossattn_cache,
+                            )
+                        )
+                    _, denoised_pred = self.generator(**gen_kwargs)
 
             # Step 3.2: record the model's output
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
             context_timestep = torch.ones_like(timestep) * self.args.context_noise
-            self.generator(
+            gen_kwargs = dict(
                 noisy_image_or_video=denoised_pred,
                 conditional_dict=conditional_dict,
                 timestep=context_timestep,
@@ -233,6 +352,16 @@ class CausalInferencePipeline(torch.nn.Module):
                 crossattn_cache=self.crossattn_cache,
                 current_start=current_start_frame * self.frame_seq_length,
             )
+            if vace_context_full is not None:
+                gen_kwargs.update(
+                    dict(
+                        vace_context=vace_context_full[:, current_start_frame: current_start_frame + current_num_frames],
+                        vace_context_scale=vace_context_scale,
+                        vace_kv_cache=self.vace_kv_cache,
+                        vace_crossattn_cache=self.vace_crossattn_cache,
+                    )
+                )
+            self.generator(**gen_kwargs)
 
             if profile:
                 block_end.record()
@@ -287,10 +416,12 @@ class CausalInferencePipeline(torch.nn.Module):
             # Use the default KV cache size
             kv_cache_size = 32760
 
+        num_heads = self.generator.model.num_heads
+        head_dim = self.generator.model.dim // num_heads
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({
-                "k": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
             })
@@ -303,10 +434,64 @@ class CausalInferencePipeline(torch.nn.Module):
         """
         crossattn_cache = []
 
+        num_heads = self.generator.model.num_heads
+        head_dim = self.generator.model.dim // num_heads
+        text_len = getattr(self.generator.model, "text_len", 512)
         for _ in range(self.num_transformer_blocks):
             crossattn_cache.append({
-                "k": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
                 "is_init": False
             })
         self.crossattn_cache = crossattn_cache
+
+    def _initialize_vace_kv_cache(self, batch_size, dtype, device):
+        """
+        Initialize a Per-GPU KV cache for the VACE blocks (causal path).
+        """
+        num_vace_blocks = len(getattr(self.generator.model, "vace_blocks", []))
+        if num_vace_blocks == 0:
+            raise ValueError("use_vace=True but the model has no vace_blocks.")
+
+        vace_kv_cache = []
+        if self.local_attn_size != -1:
+            kv_cache_size = self.local_attn_size * self.frame_seq_length
+        else:
+            kv_cache_size = 32760
+
+        num_heads = self.generator.model.num_heads
+        head_dim = self.generator.model.dim // num_heads
+        for _ in range(num_vace_blocks):
+            vace_kv_cache.append(
+                {
+                    "k": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
+                    "v": torch.zeros([batch_size, kv_cache_size, num_heads, head_dim], dtype=dtype, device=device),
+                    "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                    "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                }
+            )
+
+        self.vace_kv_cache = vace_kv_cache
+
+    def _initialize_vace_crossattn_cache(self, batch_size, dtype, device):
+        """
+        Initialize a Per-GPU cross-attention cache for the VACE blocks (causal path).
+        """
+        num_vace_blocks = len(getattr(self.generator.model, "vace_blocks", []))
+        if num_vace_blocks == 0:
+            raise ValueError("use_vace=True but the model has no vace_blocks.")
+
+        vace_crossattn_cache = []
+        num_heads = self.generator.model.num_heads
+        head_dim = self.generator.model.dim // num_heads
+        text_len = getattr(self.generator.model, "text_len", 512)
+        for _ in range(num_vace_blocks):
+            vace_crossattn_cache.append(
+                {
+                    "k": torch.zeros([batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
+                    "v": torch.zeros([batch_size, text_len, num_heads, head_dim], dtype=dtype, device=device),
+                    "is_init": False,
+                }
+            )
+
+        self.vace_crossattn_cache = vace_crossattn_cache
